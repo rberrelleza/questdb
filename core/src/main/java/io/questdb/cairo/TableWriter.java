@@ -56,6 +56,15 @@ public class TableWriter implements Closeable {
     };
     private final static RemoveFileLambda REMOVE_OR_LOG = TableWriter::removeFileAndOrLog;
     private final static RemoveFileLambda REMOVE_OR_EXCEPTION = TableWriter::removeOrException;
+
+    static {
+        IGNORED_FILES.add("..");
+        IGNORED_FILES.add(".");
+        IGNORED_FILES.add(META_FILE_NAME);
+        IGNORED_FILES.add(TXN_FILE_NAME);
+        IGNORED_FILES.add(TODO_FILE_NAME);
+    }
+
     final ObjList<AppendMemory> columns;
     private final ObjList<SymbolMapWriter> symbolMapWriters;
     private final ObjList<SymbolMapWriter> denseSymbolMapWriters;
@@ -73,6 +82,7 @@ public class TableWriter implements Closeable {
     private final RowFunction switchPartitionFunction = new SwitchPartitionRowFunction();
     private final RowFunction openPartitionFunction = new OpenPartitionRowFunction();
     private final RowFunction noPartitionFunction = new NoPartitionFunction();
+    private final RowFunction mergePartitionFunction = new MergePartitionFunction();
     private final NativeLPSZ nativeLPSZ = new NativeLPSZ();
     private final LongList columnTops;
     private final FilesFacade ff;
@@ -95,6 +105,7 @@ public class TableWriter implements Closeable {
     private final int defaultCommitMode;
     private final FindVisitor removePartitionDirectories = this::removePartitionDirectories0;
     private final ObjList<Runnable> nullers;
+    private final ObjList<VirtualMemory> mergeColumns;
     private int txPartitionCount = 0;
     private long lockFd;
     private LongConsumer timestampSetter;
@@ -199,6 +210,8 @@ public class TableWriter implements Closeable {
             this.txPendingPartitionSizes = new VirtualMemory(ff.getPageSize(), Integer.MAX_VALUE);
             this.refs.extendAndSet(columnCount, 0);
             this.columns = new ObjList<>(columnCount * 2);
+            this.mergeColumns = new ObjList<>(columnCount * 2);
+            this.row.rowColumns = columns;
             this.symbolMapWriters = new ObjList<>(columnCount);
             this.indexers = new ObjList<>(columnCount);
             this.denseSymbolMapWriters = new ObjList<>(metadata.getSymbolMapCount());
@@ -250,6 +263,117 @@ public class TableWriter implements Closeable {
                 return fmtYear;
             default:
                 return null;
+        }
+    }
+
+    private static void removeOrException(FilesFacade ff, LPSZ path) {
+        if (ff.exists(path) && !ff.remove(path)) {
+            throw CairoException.instance(ff.errno()).put("Cannot remove ").put(path);
+        }
+    }
+
+    private static int getPrimaryColumnIndex(int index) {
+        return index * 2;
+    }
+
+    private static int getSecondaryColumnIndex(int index) {
+        return getPrimaryColumnIndex(index) + 1;
+    }
+
+    private static void setColumnSize(FilesFacade ff, AppendMemory mem1, AppendMemory mem2, int type, long actualPosition, long buf) {
+        long offset;
+        long len;
+        if (actualPosition > 0) {
+            // subtract column top
+            switch (type) {
+                case ColumnType.BINARY:
+                    assert mem2 != null;
+                    readOffsetBytes(ff, mem2, actualPosition, buf);
+                    offset = Unsafe.getUnsafe().getLong(buf);
+                    readBytes(ff, mem1, buf, 8, offset, "Cannot read length, fd=");
+                    len = Unsafe.getUnsafe().getLong(buf);
+                    mem1.setSize(len == -1 ? offset + 8 : offset + len + 8);
+                    mem2.setSize(actualPosition * 8);
+                    break;
+                case ColumnType.STRING:
+                    assert mem2 != null;
+                    readOffsetBytes(ff, mem2, actualPosition, buf);
+                    offset = Unsafe.getUnsafe().getLong(buf);
+                    readBytes(ff, mem1, buf, 4, offset, "Cannot read length, fd=");
+                    len = Unsafe.getUnsafe().getInt(buf);
+                    mem1.setSize(len == -1 ? offset + 4 : offset + len * 2 + 4);
+                    mem2.setSize(actualPosition * 8);
+                    break;
+                default:
+                    mem1.setSize(actualPosition << ColumnType.pow2SizeOf(type));
+                    break;
+            }
+        } else {
+            mem1.setSize(0);
+            if (mem2 != null) {
+                mem2.setSize(0);
+            }
+        }
+    }
+
+    private static void readOffsetBytes(FilesFacade ff, AppendMemory mem, long position, long buf) {
+        readBytes(ff, mem, buf, 8, (position - 1) * 8, "Cannot read offset, fd=");
+    }
+
+    private static void readBytes(FilesFacade ff, AppendMemory mem, long buf, int byteCount, long offset, CharSequence errorMsg) {
+        if (ff.read(mem.getFd(), buf, byteCount, offset) != byteCount) {
+            throw CairoException.instance(ff.errno()).put(errorMsg).put(mem.getFd()).put(", offset=").put(offset);
+        }
+    }
+
+    /**
+     * This an O(n) method to find if column by the same name already exists. The benefit of poor performance
+     * is that we don't keep column name strings on heap. We only use this method when adding new column, where
+     * high performance of name check does not matter much.
+     *
+     * @param name to check
+     * @return 0 based column index.
+     */
+    private static int getColumnIndexQuiet(ReadOnlyMemory metaMem, CharSequence name, int columnCount) {
+        long nameOffset = getColumnNameOffset(columnCount);
+        for (int i = 0; i < columnCount; i++) {
+            CharSequence col = metaMem.getStr(nameOffset);
+            if (Chars.equalsIgnoreCase(col, name)) {
+                return i;
+            }
+            nameOffset += VirtualMemory.getStorageLength(col);
+        }
+        return -1;
+    }
+
+    private static void removeFileAndOrLog(FilesFacade ff, LPSZ name) {
+        if (ff.exists(name)) {
+            if (ff.remove(name)) {
+                LOG.info().$("removed: ").$(name).$();
+            } else {
+                LOG.error().$("cannot remove: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
+            }
+        }
+    }
+
+    private static void renameFileOrLog(FilesFacade ff, LPSZ name, LPSZ to) {
+        if (ff.exists(name)) {
+            if (ff.rename(name, to)) {
+                LOG.info().$("renamed: ").$(name).$();
+            } else {
+                LOG.error().$("cannot rename: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
+            }
+        }
+    }
+
+    static void indexAndCountDown(ColumnIndexer indexer, long lo, long hi, SOCountDownLatch latch) {
+        try {
+            indexer.refreshSourceAndIndex(lo, hi);
+        } catch (CairoException e) {
+            indexer.distress();
+            LOG.error().$("index error [fd=").$(indexer.getFd()).$(']').$('{').$((Sinkable) e).$('}').$();
+        } finally {
+            latch.countDown();
         }
     }
 
@@ -705,7 +829,6 @@ public class TableWriter implements Closeable {
         LOG.info().$("REMOVED column '").utf8(name).$("' from ").$(path).$();
     }
 
-
     public void renameColumn(CharSequence currentName, CharSequence newName) {
 
         checkDistressed();
@@ -1000,117 +1123,6 @@ public class TableWriter implements Closeable {
         }
     }
 
-    private static void removeOrException(FilesFacade ff, LPSZ path) {
-        if (ff.exists(path) && !ff.remove(path)) {
-            throw CairoException.instance(ff.errno()).put("Cannot remove ").put(path);
-        }
-    }
-
-    private static int getPrimaryColumnIndex(int index) {
-        return index * 2;
-    }
-
-    private static int getSecondaryColumnIndex(int index) {
-        return getPrimaryColumnIndex(index) + 1;
-    }
-
-    private static void setColumnSize(FilesFacade ff, AppendMemory mem1, AppendMemory mem2, int type, long actualPosition, long buf) {
-        long offset;
-        long len;
-        if (actualPosition > 0) {
-            // subtract column top
-            switch (type) {
-                case ColumnType.BINARY:
-                    assert mem2 != null;
-                    readOffsetBytes(ff, mem2, actualPosition, buf);
-                    offset = Unsafe.getUnsafe().getLong(buf);
-                    readBytes(ff, mem1, buf, 8, offset, "Cannot read length, fd=");
-                    len = Unsafe.getUnsafe().getLong(buf);
-                    mem1.setSize(len == -1 ? offset + 8 : offset + len + 8);
-                    mem2.setSize(actualPosition * 8);
-                    break;
-                case ColumnType.STRING:
-                    assert mem2 != null;
-                    readOffsetBytes(ff, mem2, actualPosition, buf);
-                    offset = Unsafe.getUnsafe().getLong(buf);
-                    readBytes(ff, mem1, buf, 4, offset, "Cannot read length, fd=");
-                    len = Unsafe.getUnsafe().getInt(buf);
-                    mem1.setSize(len == -1 ? offset + 4 : offset + len * 2 + 4);
-                    mem2.setSize(actualPosition * 8);
-                    break;
-                default:
-                    mem1.setSize(actualPosition << ColumnType.pow2SizeOf(type));
-                    break;
-            }
-        } else {
-            mem1.setSize(0);
-            if (mem2 != null) {
-                mem2.setSize(0);
-            }
-        }
-    }
-
-    private static void readOffsetBytes(FilesFacade ff, AppendMemory mem, long position, long buf) {
-        readBytes(ff, mem, buf, 8, (position - 1) * 8, "Cannot read offset, fd=");
-    }
-
-    private static void readBytes(FilesFacade ff, AppendMemory mem, long buf, int byteCount, long offset, CharSequence errorMsg) {
-        if (ff.read(mem.getFd(), buf, byteCount, offset) != byteCount) {
-            throw CairoException.instance(ff.errno()).put(errorMsg).put(mem.getFd()).put(", offset=").put(offset);
-        }
-    }
-
-    /**
-     * This an O(n) method to find if column by the same name already exists. The benefit of poor performance
-     * is that we don't keep column name strings on heap. We only use this method when adding new column, where
-     * high performance of name check does not matter much.
-     *
-     * @param name to check
-     * @return 0 based column index.
-     */
-    private static int getColumnIndexQuiet(ReadOnlyMemory metaMem, CharSequence name, int columnCount) {
-        long nameOffset = getColumnNameOffset(columnCount);
-        for (int i = 0; i < columnCount; i++) {
-            CharSequence col = metaMem.getStr(nameOffset);
-            if (Chars.equalsIgnoreCase(col, name)) {
-                return i;
-            }
-            nameOffset += VirtualMemory.getStorageLength(col);
-        }
-        return -1;
-    }
-
-    private static void removeFileAndOrLog(FilesFacade ff, LPSZ name) {
-        if (ff.exists(name)) {
-            if (ff.remove(name)) {
-                LOG.info().$("removed: ").$(name).$();
-            } else {
-                LOG.error().$("cannot remove: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
-            }
-        }
-    }
-
-    private static void renameFileOrLog(FilesFacade ff, LPSZ name, LPSZ to) {
-        if (ff.exists(name)) {
-            if (ff.rename(name, to)) {
-                LOG.info().$("renamed: ").$(name).$();
-            } else {
-                LOG.error().$("cannot rename: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
-            }
-        }
-    }
-
-    static void indexAndCountDown(ColumnIndexer indexer, long lo, long hi, SOCountDownLatch latch) {
-        try {
-            indexer.refreshSourceAndIndex(lo, hi);
-        } catch (CairoException e) {
-            indexer.distress();
-            LOG.error().$("index error [fd=").$(indexer.getFd()).$(']').$('{').$((Sinkable) e).$('}').$();
-        } finally {
-            latch.countDown();
-        }
-    }
-
     private int addColumnToMeta(
             CharSequence name,
             int type,
@@ -1339,17 +1351,23 @@ public class TableWriter implements Closeable {
     private void configureColumn(int type, boolean indexFlag) {
         final AppendMemory primary = new AppendMemory();
         final AppendMemory secondary;
+        final VirtualMemory mergePrimary = new VirtualMemory(16 * Numbers.SIZE_1MB, Integer.MAX_VALUE);
+        final VirtualMemory mergeSecondary;
         switch (type) {
             case ColumnType.BINARY:
             case ColumnType.STRING:
                 secondary = new AppendMemory();
+                mergeSecondary = new VirtualMemory(16 * Numbers.SIZE_1MB, Integer.MAX_VALUE);
                 break;
             default:
                 secondary = null;
+                mergeSecondary = null;
                 break;
         }
         columns.add(primary);
         columns.add(secondary);
+        mergeColumns.add(mergePrimary);
+        mergeColumns.add(mergeSecondary);
         configureNuller(type, primary, secondary);
         if (indexFlag) {
             indexers.extendAndSet((columns.size() - 1) / 2, new SymbolColumnIndexer());
@@ -1569,6 +1587,7 @@ public class TableWriter implements Closeable {
     }
 
     private void freeColumns(boolean truncate) {
+        // null check is because this method could be called from the constructor
         if (columns != null) {
             for (int i = 0, n = columns.size(); i < n; i++) {
                 AppendMemory m = columns.getQuick(i);
@@ -1577,6 +1596,7 @@ public class TableWriter implements Closeable {
                 }
             }
         }
+        Misc.freeObjListAndKeepObjects(mergeColumns);
     }
 
     private void freeIndexers() {
@@ -1843,6 +1863,19 @@ public class TableWriter implements Closeable {
         }
     }
 
+    private void openMergePartition() {
+        for (int i = 0; i < columnCount; i++) {
+            VirtualMemory mem1 = mergeColumns.getQuick(getPrimaryColumnIndex(i));
+            mem1.clear();
+            VirtualMemory mem2 = mergeColumns.getQuick(getSecondaryColumnIndex(i));
+            if (mem2 != null) {
+                mem2.clear();
+            }
+        }
+        row.rowColumns = mergeColumns;
+        LOG.info().$("switched partition to memory").$();
+    }
+
     private void openPartition(long timestamp) {
         try {
             setStateForTimestamp(timestamp, true);
@@ -1982,10 +2015,17 @@ public class TableWriter implements Closeable {
     }
 
     private void removeColumn(int columnIndex) {
-        Misc.free(getPrimaryColumn(columnIndex));
-        Misc.free(getSecondaryColumn(columnIndex));
-        columns.remove(getSecondaryColumnIndex(columnIndex));
-        columns.remove(getPrimaryColumnIndex(columnIndex));
+        final int pi = getPrimaryColumnIndex(columnIndex);
+        final int si = getSecondaryColumnIndex(columnIndex);
+        Misc.free(columns.getQuick(pi));
+        Misc.free(columns.getQuick(si));
+        columns.remove(pi);
+        columns.remove(pi);
+        Misc.free(mergeColumns.getQuick(pi));
+        Misc.free(mergeColumns.getQuick(si));
+        mergeColumns.remove(pi);
+        mergeColumns.remove(pi);
+
         columnTops.removeIndex(columnIndex);
         nullers.remove(columnIndex);
         if (columnIndex < indexers.size()) {
@@ -2760,6 +2800,14 @@ public class TableWriter implements Closeable {
         }
     }
 
+    private class MergePartitionFunction implements RowFunction {
+        @Override
+        public Row newRow(long timestamp) {
+            bumpMasterRef();
+            return row;
+        }
+    }
+
     private class SwitchPartitionRowFunction implements RowFunction {
         @Override
         public Row newRow(long timestamp) {
@@ -2774,7 +2822,25 @@ public class TableWriter implements Closeable {
         @NotNull
         private Row newRow0(long timestamp) {
             if (timestamp < maxTimestamp) {
-                throw CairoException.instance(ff.errno()).put("Cannot insert rows out of order. Table=").put(path);
+                LOG.info().$("out-of-order").$();
+                // Before partition can be switched we need to index records
+                // added so far. Index writers will start point to different
+                // files after switch.
+                updateIndexes();
+
+                // We need to store reference on partition so that archive
+                // file can be created in appropriate directory.
+                // For simplicity use partitionLo, which can be
+                // translated to directory name when needed
+                if (txPartitionCount++ > 0) {
+                    txPendingPartitionSizes.putLong128(transientRowCount, maxTimestamp);
+                }
+                fixedRowCount += transientRowCount;
+                txPrevTransientRowCount = transientRowCount;
+                transientRowCount = 0;
+                openMergePartition();
+                TableWriter.this.rowFunction = mergePartitionFunction;
+                return row;
             }
 
             if (timestamp > partitionHi && partitionBy != PartitionBy.NONE) {
@@ -2787,6 +2853,8 @@ public class TableWriter implements Closeable {
     }
 
     public class Row {
+        private ObjList<? extends VirtualMemory> rowColumns;
+
         public void append() {
             if ((masterRef & 1) != 0) {
                 for (int i = 0; i < columnCount; i++) {
@@ -2800,6 +2868,14 @@ public class TableWriter implements Closeable {
                     prevMinTimestamp = minTimestamp;
                 }
             }
+        }
+
+        private VirtualMemory getPrimaryColumn(int columnIndex) {
+            return rowColumns.getQuick(getPrimaryColumnIndex(columnIndex));
+        }
+
+        private VirtualMemory getSecondaryColumn(int columnIndex) {
+            return rowColumns.getQuick(getSecondaryColumnIndex(columnIndex));
         }
 
         public void cancel() {
@@ -2912,13 +2988,5 @@ public class TableWriter implements Closeable {
         private void notNull(int index) {
             refs.setQuick(index, masterRef);
         }
-    }
-
-    static {
-        IGNORED_FILES.add("..");
-        IGNORED_FILES.add(".");
-        IGNORED_FILES.add(META_FILE_NAME);
-        IGNORED_FILES.add(TXN_FILE_NAME);
-        IGNORED_FILES.add(TODO_FILE_NAME);
     }
 }
