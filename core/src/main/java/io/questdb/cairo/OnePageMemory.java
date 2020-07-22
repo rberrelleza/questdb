@@ -46,6 +46,9 @@ public class OnePageMemory implements ReadOnlyColumn, Closeable {
     private long size = 0;
     private long absolutePointer;
 
+    public OnePageMemory() {
+    }
+
     public OnePageMemory(FilesFacade ff, LPSZ name, long size) {
         of(ff, name, 0, size);
     }
