@@ -43,48 +43,48 @@ public final class SqlParser {
     private static final LowerCaseAsciiCharSequenceIntHashMap joinStartSet = new LowerCaseAsciiCharSequenceIntHashMap();
     private static final LowerCaseAsciiCharSequenceHashSet setOperations = new LowerCaseAsciiCharSequenceHashSet();
 
-    private QueryModel parseDml(GenericLexer lexer) throws SqlException {
-        QueryModel model = null;
-        QueryModel prevModel = null;
-        while (true) {
+    static {
+        tableAliasStop.add("where");
+        tableAliasStop.add("latest");
+        tableAliasStop.add("join");
+        tableAliasStop.add("inner");
+        tableAliasStop.add("left");
+        tableAliasStop.add("outer");
+        tableAliasStop.add("asof");
+        tableAliasStop.add("splice");
+        tableAliasStop.add("lt");
+        tableAliasStop.add("cross");
+        tableAliasStop.add("sample");
+        tableAliasStop.add("order");
+        tableAliasStop.add("on");
+        tableAliasStop.add("timestamp");
+        tableAliasStop.add("limit");
+        tableAliasStop.add(")");
+        tableAliasStop.add(";");
+        tableAliasStop.add("union");
+        tableAliasStop.add("except");
+        tableAliasStop.add("intersect");
+        //
+        columnAliasStop.add("from");
+        columnAliasStop.add(",");
+        columnAliasStop.add("over");
+        //
+        groupByStopSet.add("order");
+        groupByStopSet.add(")");
+        groupByStopSet.add(",");
 
-            QueryModel unionModel = parseDml0(lexer);
-            if (prevModel == null) {
-                model = unionModel;
-                prevModel = model;
-            } else {
-                prevModel.setUnionModel(unionModel);
-                prevModel = unionModel;
-            }
-
-            CharSequence tok = optTok(lexer);
-            if (tok == null || setOperations.excludes(tok)) {
-                lexer.unparse();
-                return model;
-            }
-
-            if (isUnionKeyword(tok)) {
-                tok = tok(lexer, "all or select");
-                if (isAllKeyword(tok)) {
-                    if (!model.isDistinct()) {
-                        prevModel.setUnionModelType(QueryModel.UNION_MODEL_ALL);
-                    } else {
-                        prevModel.setUnionModelType(QueryModel.UNION_MODEL_DISTINCT);
-                    }
-                } else {
-                    prevModel.setUnionModelType(QueryModel.UNION_MODEL_DISTINCT);
-                    lexer.unparse();
-                }
-            }
-
-            if (isExceptKeyword(tok)) {
-                prevModel.setUnionModelType(QueryModel.EXCEPT_MODEL);
-            }
-
-            if (isInterceptKeyword(tok)) {
-                prevModel.setUnionModelType(QueryModel.INTERCEPT_MODEL);
-            }
-        }
+        joinStartSet.put("left", QueryModel.JOIN_INNER);
+        joinStartSet.put("join", QueryModel.JOIN_INNER);
+        joinStartSet.put("inner", QueryModel.JOIN_INNER);
+        joinStartSet.put("outer", QueryModel.JOIN_OUTER);
+        joinStartSet.put("cross", QueryModel.JOIN_CROSS);
+        joinStartSet.put("asof", QueryModel.JOIN_ASOF);
+        joinStartSet.put("splice", QueryModel.JOIN_SPLICE);
+        joinStartSet.put("lt", QueryModel.JOIN_LT);
+        //
+        setOperations.add("union");
+        setOperations.add("except");
+        setOperations.add("intersect");
     }
 
     private final ObjectPool<ExpressionNode> expressionNodePool;
@@ -1138,48 +1138,48 @@ public final class SqlParser {
         throw errUnexpected(lexer, tok);
     }
 
-    static {
-        tableAliasStop.add("where");
-        tableAliasStop.add("latest");
-        tableAliasStop.add("join");
-        tableAliasStop.add("inner");
-        tableAliasStop.add("left");
-        tableAliasStop.add("outer");
-        tableAliasStop.add("asof");
-        tableAliasStop.add("splice");
-        tableAliasStop.add("lt");
-        tableAliasStop.add("cross");
-        tableAliasStop.add("sample");
-        tableAliasStop.add("order");
-        tableAliasStop.add("on");
-        tableAliasStop.add("timestamp");
-        tableAliasStop.add("limit");
-        tableAliasStop.add(")");
-        tableAliasStop.add(";");
-        tableAliasStop.add("union");
-        tableAliasStop.add("except");
-        tableAliasStop.add("intercept");
-        //
-        columnAliasStop.add("from");
-        columnAliasStop.add(",");
-        columnAliasStop.add("over");
-        //
-        groupByStopSet.add("order");
-        groupByStopSet.add(")");
-        groupByStopSet.add(",");
+    private QueryModel parseDml(GenericLexer lexer) throws SqlException {
+        QueryModel model = null;
+        QueryModel prevModel = null;
+        while (true) {
 
-        joinStartSet.put("left", QueryModel.JOIN_INNER);
-        joinStartSet.put("join", QueryModel.JOIN_INNER);
-        joinStartSet.put("inner", QueryModel.JOIN_INNER);
-        joinStartSet.put("outer", QueryModel.JOIN_OUTER);
-        joinStartSet.put("cross", QueryModel.JOIN_CROSS);
-        joinStartSet.put("asof", QueryModel.JOIN_ASOF);
-        joinStartSet.put("splice", QueryModel.JOIN_SPLICE);
-        joinStartSet.put("lt", QueryModel.JOIN_LT);
-        //
-        setOperations.add("union");
-        setOperations.add("except");
-        setOperations.add("intercept");
+            QueryModel unionModel = parseDml0(lexer);
+            if (prevModel == null) {
+                model = unionModel;
+                prevModel = model;
+            } else {
+                prevModel.setUnionModel(unionModel);
+                prevModel = unionModel;
+            }
+
+            CharSequence tok = optTok(lexer);
+            if (tok == null || setOperations.excludes(tok)) {
+                lexer.unparse();
+                return model;
+            }
+
+            if (isUnionKeyword(tok)) {
+                tok = tok(lexer, "all or select");
+                if (isAllKeyword(tok)) {
+                    if (!model.isDistinct()) {
+                        prevModel.setSetOperationType(QueryModel.SET_OPERATION_UNION_ALL);
+                    } else {
+                        prevModel.setSetOperationType(QueryModel.SET_OPERATION_UNION);
+                    }
+                } else {
+                    prevModel.setSetOperationType(QueryModel.SET_OPERATION_UNION);
+                    lexer.unparse();
+                }
+            }
+
+            if (isExceptKeyword(tok)) {
+                prevModel.setSetOperationType(QueryModel.SET_OPERATION_EXCEPT);
+            }
+
+            if (isIntersectKeyword(tok)) {
+                prevModel.setSetOperationType(QueryModel.SET_OPERATION_INTERSECT);
+            }
+        }
     }
 
     private void parseSelectFrom(GenericLexer lexer, QueryModel model, QueryModel masterModel) throws SqlException {
