@@ -1,27 +1,28 @@
-FROM openjdk:11.0.7-jdk
+FROM maven:3-openjdk-11 as dev
 
 RUN apt-get update \
   && apt-get install git curl -y
 
 WORKDIR /build
 
-RUN curl -L "https://www.mirrorservice.org/sites/ftp.apache.org/maven/maven-3/3.6.3/binaries/apache-maven-3.6.3-bin.zip" --output maven.zip \
-  && unzip maven.zip \
-  && git clone --depth=1 --progress --verbose https://github.com/questdb/questdb.git
+RUN git clone --depth=1 --progress --verbose https://github.com/questdb/questdb.git
 
 WORKDIR /build/questdb
 
-RUN ../apache-maven-3.6.3/bin/mvn clean package -DskipTests -Dprofile.install-local-nodejs
+RUN mvn clean package -DskipTests -Dprofile.install-local-nodejs
+
+ENV PATH=/build/questdb/core/node:/usr/local/openjdk-11/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+FROM dev as build
 
 WORKDIR /build/questdb/core/target
-
 RUN tar xvfz questdb-*-rt-linux-amd64.tar.gz
 
 FROM debian:stretch-slim
 
 WORKDIR /app
 
-COPY --from=0 /build/questdb/core/target/questdb-*-rt-linux-amd64 .
+COPY --from=build /build/questdb/core/target/questdb-*-rt-linux-amd64 .
 
 WORKDIR /app/bin
 
