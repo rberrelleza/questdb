@@ -57,15 +57,6 @@ public class TableWriter implements Closeable {
     };
     private final static RemoveFileLambda REMOVE_OR_LOG = TableWriter::removeFileAndOrLog;
     private final static RemoveFileLambda REMOVE_OR_EXCEPTION = TableWriter::removeOrException;
-
-    static {
-        IGNORED_FILES.add("..");
-        IGNORED_FILES.add(".");
-        IGNORED_FILES.add(META_FILE_NAME);
-        IGNORED_FILES.add(TXN_FILE_NAME);
-        IGNORED_FILES.add(TODO_FILE_NAME);
-    }
-
     final ObjList<AppendMemory> columns;
     private final ObjList<SymbolMapWriter> symbolMapWriters;
     private final ObjList<SymbolMapWriter> denseSymbolMapWriters;
@@ -270,138 +261,6 @@ public class TableWriter implements Closeable {
             default:
                 return null;
         }
-    }
-
-    private static void removeOrException(FilesFacade ff, LPSZ path) {
-        if (ff.exists(path) && !ff.remove(path)) {
-            throw CairoException.instance(ff.errno()).put("Cannot remove ").put(path);
-        }
-    }
-
-    private static int getPrimaryColumnIndex(int index) {
-        return index * 2;
-    }
-
-    private static int getSecondaryColumnIndex(int index) {
-        return getPrimaryColumnIndex(index) + 1;
-    }
-
-    private static void setColumnSize(FilesFacade ff, AppendMemory mem1, AppendMemory mem2, int type, long actualPosition, long buf) {
-        long offset;
-        long len;
-        if (actualPosition > 0) {
-            // subtract column top
-            switch (type) {
-                case ColumnType.BINARY:
-                    assert mem2 != null;
-                    readOffsetBytes(ff, mem2, actualPosition, buf);
-                    offset = Unsafe.getUnsafe().getLong(buf);
-                    readBytes(ff, mem1, buf, 8, offset, "Cannot read length, fd=");
-                    len = Unsafe.getUnsafe().getLong(buf);
-                    mem1.setSize(len == -1 ? offset + 8 : offset + len + 8);
-                    mem2.setSize(actualPosition * 8);
-                    break;
-                case ColumnType.STRING:
-                    assert mem2 != null;
-                    readOffsetBytes(ff, mem2, actualPosition, buf);
-                    offset = Unsafe.getUnsafe().getLong(buf);
-                    readBytes(ff, mem1, buf, 4, offset, "Cannot read length, fd=");
-                    len = Unsafe.getUnsafe().getInt(buf);
-                    mem1.setSize(len == -1 ? offset + 4 : offset + len * 2 + 4);
-                    mem2.setSize(actualPosition * 8);
-                    break;
-                default:
-                    mem1.setSize(actualPosition << ColumnType.pow2SizeOf(type));
-                    break;
-            }
-        } else {
-            mem1.setSize(0);
-            if (mem2 != null) {
-                mem2.setSize(0);
-            }
-        }
-    }
-
-    private static void readOffsetBytes(FilesFacade ff, AppendMemory mem, long position, long buf) {
-        readBytes(ff, mem, buf, 8, (position - 1) * 8, "Cannot read offset, fd=");
-    }
-
-    private static void readBytes(FilesFacade ff, AppendMemory mem, long buf, int byteCount, long offset, CharSequence errorMsg) {
-        if (ff.read(mem.getFd(), buf, byteCount, offset) != byteCount) {
-            throw CairoException.instance(ff.errno()).put(errorMsg).put(mem.getFd()).put(", offset=").put(offset);
-        }
-    }
-
-    /**
-     * This an O(n) method to find if column by the same name already exists. The benefit of poor performance
-     * is that we don't keep column name strings on heap. We only use this method when adding new column, where
-     * high performance of name check does not matter much.
-     *
-     * @param name to check
-     * @return 0 based column index.
-     */
-    private static int getColumnIndexQuiet(ReadOnlyMemory metaMem, CharSequence name, int columnCount) {
-        long nameOffset = getColumnNameOffset(columnCount);
-        for (int i = 0; i < columnCount; i++) {
-            CharSequence col = metaMem.getStr(nameOffset);
-            if (Chars.equalsIgnoreCase(col, name)) {
-                return i;
-            }
-            nameOffset += VirtualMemory.getStorageLength(col);
-        }
-        return -1;
-    }
-
-    private static void removeFileAndOrLog(FilesFacade ff, LPSZ name) {
-        if (ff.exists(name)) {
-            if (ff.remove(name)) {
-                LOG.info().$("removed: ").$(name).$();
-            } else {
-                LOG.error().$("cannot remove: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
-            }
-        }
-    }
-
-    private static void renameFileOrLog(FilesFacade ff, LPSZ name, LPSZ to) {
-        if (ff.exists(name)) {
-            if (ff.rename(name, to)) {
-                LOG.info().$("renamed: ").$(name).$();
-            } else {
-                LOG.error().$("cannot rename: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
-            }
-        }
-    }
-
-    static void indexAndCountDown(ColumnIndexer indexer, long lo, long hi, SOCountDownLatch latch) {
-        try {
-            indexer.refreshSourceAndIndex(lo, hi);
-        } catch (CairoException e) {
-            indexer.distress();
-            LOG.error().$("index error [fd=").$(indexer.getFd()).$(']').$('{').$((Sinkable) e).$('}').$();
-        } finally {
-            latch.countDown();
-        }
-    }
-
-    private static long searchIndex(long indexAddress, long low, long high, long value, int scanDirection) {
-        while (low < high) {
-            long mid = (low + high - 1) >>> 1;
-            long midVal = Unsafe.getUnsafe().getLong(indexAddress + mid * 16);
-
-            if (midVal < value)
-                low = mid + 1;
-            else if (midVal > value)
-                high = mid;
-            else {
-                // In case of multiple equal values, find the first
-                mid += scanDirection;
-                while (mid > 0 && mid < high && midVal == Unsafe.getUnsafe().getLong(indexAddress + mid * 16)) {
-                    mid += scanDirection;
-                }
-                return mid - scanDirection;
-            }
-        }
-        return -(low + 1);
     }
 
     public void addColumn(CharSequence name, int type) {
@@ -714,203 +573,6 @@ public class TableWriter implements Closeable {
         }
     }
 
-    private void mergeOutOfOrderRecords() {
-        final int timestampIndex = metadata.getTimestampIndex();
-//        long i = 0;
-
-        int pageCount = timestampMergeMem.getPageCount();
-        long p;
-        long struct = p = Unsafe.malloc(TIMESTAMP_MERGE_ENTRY_BYTES * pageCount);
-
-        LOG.info().$("sorting [name=").$(name).$(", pages=").$(pageCount).$(']').$();
-        for (int i = 0; i < pageCount; i++) {
-            final long pageAddr = timestampMergeMem.getPageAddress(i);
-            final long pageSize = timestampMergeMem.getPageUsedSize(i) / TIMESTAMP_MERGE_ENTRY_BYTES;
-            System.out.println(Long.toHexString(pageAddr));
-            Vect.sortLongIndexAscInPlace(pageAddr, pageSize);
-            Unsafe.getUnsafe().putLong(p, pageAddr);
-            Unsafe.getUnsafe().putLong(p + Long.BYTES, pageSize);
-            p += TIMESTAMP_MERGE_ENTRY_BYTES;
-        }
-
-        LOG.info().$("merging [name=").$(name).$(", pages=").$(pageCount).$(']').$();
-        long mergedTimestamps = Vect.mergeLongIndexesAsc(struct, pageCount);
-
-        // we have three frames:
-        // partition logical "lo" and "hi" - absolute bounds (partitionLo, partitionHi)
-        // partition actual data "lo" and "hi" (dataLo, dataHi)
-        // out of order "lo" and "hi" (indexLo, indexHi)
-
-        long indexLo = 0;
-        long indexMax = mergeRowCount;
-
-        long ooTimestampLo = Unsafe.getUnsafe().getLong(mergedTimestamps);
-        long ooTimestampHi = Unsafe.getUnsafe().getLong(mergedTimestamps + (indexMax - 1) * 16);
-
-        setStateForTimestamp(ooTimestampLo, true);
-        dFile(path, metadata.getColumnName(timestampIndex));
-        long partitionTimestampHi = this.partitionHi;
-
-//        long indexHi = searchIndex(mergedTimestamps, indexLo, rowCount - 1, partitionTimestampHi, BinarySearch.SCAN_DOWN);
-//        if (indexHi < 0) {
-//            indexHi = -indexHi - 1;
-//        }
-
-//        long ooTimestampHi = Unsafe.getUnsafe().getLong(mergedTimestamps + mergeRowCount * TIMESTAMP_MERGE_ENTRY_BYTES);
-
-        // we may need to re-use file descriptors when this partition is the "current" one
-        // we cannot open file again due to sharing violation
-        //
-        // to determine that 'ooTimestampLo' goes into current partition
-        // we need to compare 'partitionTimestampHi', which is appropriately truncated to DAY/MONTH/YEAR
-        // to this.maxTimestamp, which isn't truncated yet. So we need to truncate it first
-        long maxTruncated = 0;
-        switch (partitionBy) {
-            case PartitionBy.DAY:
-                maxTruncated = Timestamps.ceilDD(this.maxTimestamp);
-                break;
-            case PartitionBy.MONTH:
-                maxTruncated = Timestamps.ceilMM(this.maxTimestamp);
-                break;
-            case PartitionBy.YEAR:
-                maxTruncated = Timestamps.ceilYYYY(this.maxTimestamp);
-                break;
-            default:
-                assert false;
-        }
-
-        long activeTimestampFd = columns.getQuick(getPrimaryColumnIndex(timestampIndex)).getFd();
-        long fd = activeTimestampFd;
-        long dataTimestampLo;
-        long dataTimestampHi;
-        long dataIndexLo = 0;
-        long dataIndexMax;
-
-        try {
-            if (partitionTimestampHi == maxTruncated) {
-                dataTimestampHi = this.maxTimestamp;
-                dataIndexMax = transientRowCountBeforeOutOfOrder;
-            } else {
-                // todo: close "fd" if we opened it
-                fd = ff.openRW(path);
-                if (fd == -1) {
-                    throw CairoException.instance(ff.errno()).put("could not open `").put(path).put('`');
-                }
-
-                // todo: read the archive
-                dataIndexMax = ff.length(fd) / Long.BYTES;
-
-//                // read bottom of file
-//                // todo: check that offset is non-negative
-                if (ff.read(fd, tempMem8b, Long.BYTES, (dataIndexMax - 1) * Long.BYTES) != Long.BYTES) {
-                    throw CairoException.instance(ff.errno()).put("could not read bottom 8 bytes from `").put(path).put('`');
-                }
-                dataTimestampHi = Unsafe.getUnsafe().getLong(tempMem8b);
-            }
-
-            // read the top value
-            // todo: check that file size is > 8 bytes
-            if (ff.read(fd, tempMem8b, Long.BYTES, 0) != Long.BYTES) {
-                throw CairoException.instance(ff.errno()).put("could not read top 8 bytes from `").put(path).put('`');
-            }
-
-            dataTimestampLo = Unsafe.getUnsafe().getLong(tempMem8b);
-            // this is an overloaded function, page size is derived from the file size
-            timestampSearchColumn.of(ff, path, 0, dataIndexMax * Long.BYTES);
-
-            // create copy jobs
-            if (ooTimestampLo < dataTimestampLo) {
-
-                // need to copy OO data first
-                // find the low boundary
-                long l1 = searchIndex(mergedTimestamps, indexLo, indexMax - 1, dataTimestampLo, BinarySearch.SCAN_DOWN);
-                LOG.info().$("copy ooo set [from=").$(indexLo).$(", to=").$(l1).$(']').$();
-
-                long l2_ooo;
-                long l2_data;
-                if (ooTimestampHi >= dataTimestampLo) {
-
-                    if (ooTimestampHi < dataTimestampHi) {
-                        l2_data = BinarySearch.search(timestampSearchColumn, ooTimestampHi, dataIndexLo, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
-                        l2_ooo = indexMax - 1;
-                    } else if (ooTimestampHi > dataTimestampHi) {
-                        l2_ooo = searchIndex(mergedTimestamps, l1 + 1, indexMax, dataTimestampHi, BinarySearch.SCAN_DOWN);
-                        l2_data = dataIndexMax - 1;
-                    } else {
-                        l2_ooo = indexMax - 1;
-                        l2_data = dataIndexMax - 1;
-                    }
-
-                    // do the merge
-                    LOG.info()
-                            .$("merged data + ooo [dataFrom=").$(dataIndexLo)
-                            .$(", dataTo=").$(l2_data)
-                            .$(", oooFrom=").$(l1 + 1)
-                            .$(", oooTo=").$(l2_ooo)
-                            .$(']').$();
-                } else {
-                    l2_ooo = indexMax - 1;
-                    l2_data = dataIndexMax - 1;
-                }
-
-//                if (l2_ooo < indexMax - 1) {
-//                    LOG.info().$("copy ooo set [from=").$(l2_ooo + 1).$(", to=").$(indexMax - 1).$(']').$();
-//                } else if (l2_data < dataIndexMax - 1) {
-//                    LOG.info().$("copy date set [from=").$(l2_data + 1).$(", to=").$(dataIndexMax - 1).$(']').$();
-//                }
-            } else {
-                long l1 = BinarySearch.search(timestampSearchColumn, ooTimestampLo, 0, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
-                LOG.info().$("copy data set [from=").$(0).$(", to=").$(l1).$(']').$();
-
-                long l2_ooo;
-                long l2_data;
-                if (ooTimestampLo <= dataTimestampHi) {
-
-                    if (ooTimestampHi < dataTimestampHi) {
-                        l2_data = BinarySearch.search(timestampSearchColumn, ooTimestampHi, dataIndexLo, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
-                        l2_ooo = indexMax - 1;
-                    } else if (ooTimestampHi > dataTimestampHi) {
-                        l2_ooo = searchIndex(mergedTimestamps, l1 + 1, indexMax, dataTimestampHi, BinarySearch.SCAN_DOWN);
-                        l2_data = dataIndexMax - 1;
-                    } else {
-                        l2_ooo = indexMax - 1;
-                        l2_data = dataIndexMax - 1;
-                    }
-
-                    // do the merge
-                    LOG.info()
-                            .$("merged data + ooo [dataFrom=").$(dataIndexLo)
-                            .$(", dataTo=").$(l2_data)
-                            .$(", oooFrom=").$(l1 + 1)
-                            .$(", oooTo=").$(l2_ooo)
-                            .$(']').$();
-
-//                    if (l2_ooo < indexMax - 1) {
-//                        LOG.info().$("copy ooo set [from=").$(l2_ooo + 1).$(", to=").$(indexMax - 1).$(']').$();
-//                    } else if (l2_data < dataIndexMax - 1) {
-//                        LOG.info().$("copy data set [from=").$(l2_data + 1).$(", to=").$(dataIndexMax - 1).$(']').$();
-//                    }
-
-                } else {
-                    l2_ooo = indexMax - 1;
-                    l2_data = dataIndexMax - 1;
-                }
-
-                if (l2_ooo < indexMax - 1) {
-                    LOG.info().$("copy ooo set [from=").$(l2_ooo + 1).$(", to=").$(indexMax - 1).$(']').$();
-                } else if (l2_data < dataIndexMax - 1) {
-                    LOG.info().$("copy date set [from=").$(l2_data + 1).$(", to=").$(dataIndexMax - 1).$(']').$();
-                }
-            }
-
-        } finally {
-            if (fd != activeTimestampFd) {
-                ff.close(fd);
-            }
-        }
-        this.mergeRowCount = 0;
-    }
-
     public int getColumnIndex(CharSequence name) {
         int index = metadata.getColumnIndexQuiet(name);
         if (index > -1) {
@@ -1057,82 +719,6 @@ public class TableWriter implements Closeable {
         LOG.info().$("REMOVED column '").utf8(name).$("' from ").$(path).$();
     }
 
-    public void renameColumn(CharSequence currentName, CharSequence newName) {
-
-        checkDistressed();
-
-        final int index = getColumnIndex(currentName);
-        final int type = metadata.getColumnType(index);
-
-        LOG.info().$("renaming column '").utf8(currentName).$("' to '").utf8(newName).$("' from ").$(path).$();
-
-        commit();
-
-        this.metaSwapIndex = renameColumnFromMeta(index, newName);
-
-        // close _meta so we can rename it
-        metaMem.close();
-
-        // rename _meta to _meta.prev
-        renameMetaToMetaPrev(currentName);
-
-        // after we moved _meta to _meta.prev
-        // we have to have _todo to restore _meta should anything go wrong
-        writeRestoreMetaTodo(currentName);
-
-        // rename _meta.swp to _meta
-        renameSwapMetaToMeta(currentName);
-
-        try {
-            // open _meta file
-            openMetaFile();
-
-            // remove _todo
-            removeTodoFile();
-
-            // rename column files has to be done after _todo is removed
-            renameColumnFiles(currentName, newName, type);
-        } catch (CairoException err) {
-            throwDistressException(err);
-        }
-
-        bumpStructureVersion();
-
-        metadata.renameColumn(currentName, newName);
-
-        LOG.info().$("RENAMED column '").utf8(currentName).$("' to '").utf8(newName).$("' from ").$(path).$();
-    }
-
-    private void renameColumnFiles(CharSequence columnName, CharSequence newName, int columnType) {
-        try {
-            ff.iterateDir(path.$(), (file, type) -> {
-                nativeLPSZ.of(file);
-                if (type == Files.DT_DIR && IGNORED_FILES.excludes(nativeLPSZ)) {
-                    path.trimTo(rootLen);
-                    path.concat(nativeLPSZ);
-                    other.trimTo(rootLen);
-                    other.concat(nativeLPSZ);
-                    int plen = path.length();
-                    renameFileOrLog(ff, dFile(path.trimTo(plen), columnName), dFile(other.trimTo(plen), newName));
-                    renameFileOrLog(ff, iFile(path.trimTo(plen), columnName), iFile(other.trimTo(plen), newName));
-                    renameFileOrLog(ff, topFile(path.trimTo(plen), columnName), topFile(other.trimTo(plen), newName));
-                    renameFileOrLog(ff, BitmapIndexUtils.keyFileName(path.trimTo(plen), columnName), BitmapIndexUtils.keyFileName(other.trimTo(plen), newName));
-                    renameFileOrLog(ff, BitmapIndexUtils.valueFileName(path.trimTo(plen), columnName), BitmapIndexUtils.valueFileName(other.trimTo(plen), newName));
-                }
-            });
-
-            if (columnType == ColumnType.SYMBOL) {
-                renameFileOrLog(ff, SymbolMapWriter.offsetFileName(path.trimTo(rootLen), columnName), SymbolMapWriter.offsetFileName(other.trimTo(rootLen), newName));
-                renameFileOrLog(ff, SymbolMapWriter.charFileName(path.trimTo(rootLen), columnName), SymbolMapWriter.charFileName(other.trimTo(rootLen), newName));
-                renameFileOrLog(ff, BitmapIndexUtils.keyFileName(path.trimTo(rootLen), columnName), BitmapIndexUtils.keyFileName(other.trimTo(rootLen), newName));
-                renameFileOrLog(ff, BitmapIndexUtils.valueFileName(path.trimTo(rootLen), columnName), BitmapIndexUtils.valueFileName(other.trimTo(rootLen), newName));
-            }
-        } finally {
-            path.trimTo(rootLen);
-            other.trimTo(rootLen);
-        }
-    }
-
     public boolean removePartition(long timestamp) {
 
         if (partitionBy == PartitionBy.NONE || timestamp < timestampFloorMethod.floor(minTimestamp) || timestamp > maxTimestamp) {
@@ -1222,6 +808,52 @@ public class TableWriter implements Closeable {
         } finally {
             path.trimTo(rootLen);
         }
+    }
+
+    public void renameColumn(CharSequence currentName, CharSequence newName) {
+
+        checkDistressed();
+
+        final int index = getColumnIndex(currentName);
+        final int type = metadata.getColumnType(index);
+
+        LOG.info().$("renaming column '").utf8(currentName).$("' to '").utf8(newName).$("' from ").$(path).$();
+
+        commit();
+
+        this.metaSwapIndex = renameColumnFromMeta(index, newName);
+
+        // close _meta so we can rename it
+        metaMem.close();
+
+        // rename _meta to _meta.prev
+        renameMetaToMetaPrev(currentName);
+
+        // after we moved _meta to _meta.prev
+        // we have to have _todo to restore _meta should anything go wrong
+        writeRestoreMetaTodo(currentName);
+
+        // rename _meta.swp to _meta
+        renameSwapMetaToMeta(currentName);
+
+        try {
+            // open _meta file
+            openMetaFile();
+
+            // remove _todo
+            removeTodoFile();
+
+            // rename column files has to be done after _todo is removed
+            renameColumnFiles(currentName, newName, type);
+        } catch (CairoException err) {
+            throwDistressException(err);
+        }
+
+        bumpStructureVersion();
+
+        metadata.renameColumn(currentName, newName);
+
+        LOG.info().$("RENAMED column '").utf8(currentName).$("' to '").utf8(newName).$("' from ").$(path).$();
     }
 
     public void rollback() {
@@ -1349,6 +981,138 @@ public class TableWriter implements Closeable {
         } finally {
             r.cancel();
         }
+    }
+
+    private static void removeOrException(FilesFacade ff, LPSZ path) {
+        if (ff.exists(path) && !ff.remove(path)) {
+            throw CairoException.instance(ff.errno()).put("Cannot remove ").put(path);
+        }
+    }
+
+    private static int getPrimaryColumnIndex(int index) {
+        return index * 2;
+    }
+
+    private static int getSecondaryColumnIndex(int index) {
+        return getPrimaryColumnIndex(index) + 1;
+    }
+
+    private static void setColumnSize(FilesFacade ff, AppendMemory mem1, AppendMemory mem2, int type, long actualPosition, long buf) {
+        long offset;
+        long len;
+        if (actualPosition > 0) {
+            // subtract column top
+            switch (type) {
+                case ColumnType.BINARY:
+                    assert mem2 != null;
+                    readOffsetBytes(ff, mem2, actualPosition, buf);
+                    offset = Unsafe.getUnsafe().getLong(buf);
+                    readBytes(ff, mem1, buf, 8, offset, "Cannot read length, fd=");
+                    len = Unsafe.getUnsafe().getLong(buf);
+                    mem1.setSize(len == -1 ? offset + 8 : offset + len + 8);
+                    mem2.setSize(actualPosition * 8);
+                    break;
+                case ColumnType.STRING:
+                    assert mem2 != null;
+                    readOffsetBytes(ff, mem2, actualPosition, buf);
+                    offset = Unsafe.getUnsafe().getLong(buf);
+                    readBytes(ff, mem1, buf, 4, offset, "Cannot read length, fd=");
+                    len = Unsafe.getUnsafe().getInt(buf);
+                    mem1.setSize(len == -1 ? offset + 4 : offset + len * 2 + 4);
+                    mem2.setSize(actualPosition * 8);
+                    break;
+                default:
+                    mem1.setSize(actualPosition << ColumnType.pow2SizeOf(type));
+                    break;
+            }
+        } else {
+            mem1.setSize(0);
+            if (mem2 != null) {
+                mem2.setSize(0);
+            }
+        }
+    }
+
+    private static void readOffsetBytes(FilesFacade ff, AppendMemory mem, long position, long buf) {
+        readBytes(ff, mem, buf, 8, (position - 1) * 8, "Cannot read offset, fd=");
+    }
+
+    private static void readBytes(FilesFacade ff, AppendMemory mem, long buf, int byteCount, long offset, CharSequence errorMsg) {
+        if (ff.read(mem.getFd(), buf, byteCount, offset) != byteCount) {
+            throw CairoException.instance(ff.errno()).put(errorMsg).put(mem.getFd()).put(", offset=").put(offset);
+        }
+    }
+
+    /**
+     * This an O(n) method to find if column by the same name already exists. The benefit of poor performance
+     * is that we don't keep column name strings on heap. We only use this method when adding new column, where
+     * high performance of name check does not matter much.
+     *
+     * @param name to check
+     * @return 0 based column index.
+     */
+    private static int getColumnIndexQuiet(ReadOnlyMemory metaMem, CharSequence name, int columnCount) {
+        long nameOffset = getColumnNameOffset(columnCount);
+        for (int i = 0; i < columnCount; i++) {
+            CharSequence col = metaMem.getStr(nameOffset);
+            if (Chars.equalsIgnoreCase(col, name)) {
+                return i;
+            }
+            nameOffset += VirtualMemory.getStorageLength(col);
+        }
+        return -1;
+    }
+
+    private static void removeFileAndOrLog(FilesFacade ff, LPSZ name) {
+        if (ff.exists(name)) {
+            if (ff.remove(name)) {
+                LOG.info().$("removed: ").$(name).$();
+            } else {
+                LOG.error().$("cannot remove: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
+            }
+        }
+    }
+
+    private static void renameFileOrLog(FilesFacade ff, LPSZ name, LPSZ to) {
+        if (ff.exists(name)) {
+            if (ff.rename(name, to)) {
+                LOG.info().$("renamed: ").$(name).$();
+            } else {
+                LOG.error().$("cannot rename: ").utf8(name).$(" [errno=").$(ff.errno()).$(']').$();
+            }
+        }
+    }
+
+    static void indexAndCountDown(ColumnIndexer indexer, long lo, long hi, SOCountDownLatch latch) {
+        try {
+            indexer.refreshSourceAndIndex(lo, hi);
+        } catch (CairoException e) {
+            indexer.distress();
+            LOG.error().$("index error [fd=").$(indexer.getFd()).$(']').$('{').$((Sinkable) e).$('}').$();
+        } finally {
+            latch.countDown();
+        }
+    }
+
+    private static long searchIndex(long indexAddress, long value, long low, long high, int scanDirection) {
+        while (low < high) {
+            long mid = (low + high - 1) >>> 1;
+            long midVal = Unsafe.getUnsafe().getLong(indexAddress + mid * 16);
+
+            if (midVal < value)
+                low = mid + 1;
+            else if (midVal > value)
+                high = mid;
+            else {
+                // In case of multiple equal values, find the first
+                mid += scanDirection;
+                while (mid > 0 && mid < high && midVal == Unsafe.getUnsafe().getLong(indexAddress + mid * 16)) {
+                    mid += scanDirection;
+                }
+                return mid - scanDirection;
+            }
+        }
+        return -(low + 1);
     }
 
     private int addColumnToMeta(
@@ -2027,6 +1791,284 @@ public class TableWriter implements Closeable {
         }
     }
 
+    private void mergeOutOfOrderRecords() {
+        final int timestampIndex = metadata.getTimestampIndex();
+//        long i = 0;
+
+        int pageCount = timestampMergeMem.getPageCount();
+        long p;
+        long struct = p = Unsafe.malloc(TIMESTAMP_MERGE_ENTRY_BYTES * pageCount);
+
+        LOG.info().$("sorting [name=").$(name).$(", pages=").$(pageCount).$(']').$();
+        for (int i = 0; i < pageCount; i++) {
+            final long pageAddr = timestampMergeMem.getPageAddress(i);
+            final long pageSize = timestampMergeMem.getPageUsedSize(i) / TIMESTAMP_MERGE_ENTRY_BYTES;
+            // todo: sort in parallel
+            Vect.sortLongIndexAscInPlace(pageAddr, pageSize);
+            Unsafe.getUnsafe().putLong(p, pageAddr);
+            Unsafe.getUnsafe().putLong(p + Long.BYTES, pageSize);
+            p += TIMESTAMP_MERGE_ENTRY_BYTES;
+        }
+
+        LOG.info().$("merging [name=").$(name).$(", pages=").$(pageCount).$(']').$();
+        long mergedTimestamps = Vect.mergeLongIndexesAsc(struct, pageCount);
+
+        // we have three frames:
+        // partition logical "lo" and "hi" - absolute bounds (partitionLo, partitionHi)
+        // partition actual data "lo" and "hi" (dataLo, dataHi)
+        // out of order "lo" and "hi" (indexLo, indexHi)
+
+        long indexLo = 0;
+        long indexHi;
+        long indexMax = mergeRowCount;
+
+        long ooTimestampLo = Unsafe.getUnsafe().getLong(mergedTimestamps);
+        long ooTimestampHi = Unsafe.getUnsafe().getLong(mergedTimestamps + (indexMax - 1) * 16);
+
+        setStateForTimestamp(ooTimestampLo, true);
+        dFile(path, metadata.getColumnName(timestampIndex));
+        long partitionTimestampHi = this.partitionHi;
+
+        // find "current" partition boundary in the out of order data
+        // once we know the boundary we can move on to calculating another one
+        if (ooTimestampHi > partitionTimestampHi) {
+            indexHi = searchIndex(mergedTimestamps, partitionTimestampHi, indexLo, indexMax - 1, BinarySearch.SCAN_DOWN);
+            if (indexHi < 0) {
+                indexHi = -indexHi - 1;
+            }
+        } else {
+            indexHi = indexMax - 1;
+        }
+
+//        long ooTimestampHi = Unsafe.getUnsafe().getLong(mergedTimestamps + mergeRowCount * TIMESTAMP_MERGE_ENTRY_BYTES);
+
+        // we may need to re-use file descriptors when this partition is the "current" one
+        // we cannot open file again due to sharing violation
+        //
+        // to determine that 'ooTimestampLo' goes into current partition
+        // we need to compare 'partitionTimestampHi', which is appropriately truncated to DAY/MONTH/YEAR
+        // to this.maxTimestamp, which isn't truncated yet. So we need to truncate it first
+        long maxTruncated = 0;
+        switch (partitionBy) {
+            case PartitionBy.DAY:
+                maxTruncated = Timestamps.ceilDD(this.maxTimestamp);
+                break;
+            case PartitionBy.MONTH:
+                maxTruncated = Timestamps.ceilMM(this.maxTimestamp);
+                break;
+            case PartitionBy.YEAR:
+                maxTruncated = Timestamps.ceilYYYY(this.maxTimestamp);
+                break;
+            default:
+                assert false;
+        }
+
+        long fdToClose = 0;
+        long fd;
+        long dataTimestampLo;
+        long dataTimestampHi;
+        long dataIndexMax;
+
+        try {
+            if (partitionTimestampHi == maxTruncated) {
+                dataTimestampHi = this.maxTimestamp;
+                dataIndexMax = transientRowCountBeforeOutOfOrder;
+                fd = columns.getQuick(getPrimaryColumnIndex(timestampIndex)).getFd();
+            } else {
+                // todo: close "fd" if we opened it
+                fdToClose = fd = ff.openRW(path);
+                if (fd == -1) {
+                    throw CairoException.instance(ff.errno()).put("could not open `").put(path).put('`');
+                }
+
+                // todo: read the archive
+                dataIndexMax = ff.length(fd) / Long.BYTES;
+
+//                // read bottom of file
+//                // todo: check that offset is non-negative
+                if (ff.read(fd, tempMem8b, Long.BYTES, (dataIndexMax - 1) * Long.BYTES) != Long.BYTES) {
+                    throw CairoException.instance(ff.errno()).put("could not read bottom 8 bytes from `").put(path).put('`');
+                }
+                dataTimestampHi = Unsafe.getUnsafe().getLong(tempMem8b);
+            }
+
+            // read the top value
+            // todo: check that file size is > 8 bytes
+            if (ff.read(fd, tempMem8b, Long.BYTES, 0) != Long.BYTES) {
+                throw CairoException.instance(ff.errno()).put("could not read top 8 bytes from `").put(path).put('`');
+            }
+
+            dataTimestampLo = Unsafe.getUnsafe().getLong(tempMem8b);
+            // this is an overloaded function, page size is derived from the file size
+            timestampSearchColumn.of(ff, path, 0, dataIndexMax * Long.BYTES);
+
+            // create copy jobs
+            long l2_ooo;
+            long l2_data;
+            if (ooTimestampLo < dataTimestampLo) {
+
+                //            +-----+
+                //            | OOO |
+                //
+                //  +------+
+                //  | data |
+
+                long l1 = searchIndex(mergedTimestamps, dataTimestampLo, indexLo, indexHi, BinarySearch.SCAN_DOWN);
+                LOG.info().$("copy ooo set [from=").$(indexLo).$(", to=").$(l1).$(']').$();
+
+                if (ooTimestampHi >= dataTimestampLo) {
+
+                    //
+                    //  +------+  | OOO |
+                    //  | data |  +-----+
+                    //  |      |
+
+                    if (ooTimestampHi < dataTimestampHi) {
+
+                        // |      | |     |
+                        // |      | | OOO |
+                        // | data | +-----+
+                        // |      |
+                        // +------+
+
+                        l2_ooo = indexHi;
+                        l2_data = BinarySearch.search(timestampSearchColumn, ooTimestampHi, 0, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
+                    } else if (ooTimestampHi > dataTimestampHi) {
+
+                        // |      | |     |
+                        // |      | | OOO |
+                        // | data | |     |
+                        // +------+ |     |
+                        //          +-----+
+
+                        l2_ooo = searchIndex(mergedTimestamps, dataTimestampHi, l1 + 1, indexHi, BinarySearch.SCAN_DOWN);
+                        l2_data = dataIndexMax - 1;
+                    } else {
+
+                        // |      | |     |
+                        // |      | | OOO |
+                        // | data | |     |
+                        // +------+ +-----+
+
+                        l2_ooo = indexHi;
+                        l2_data = dataIndexMax - 1;
+                    }
+
+                    // do the merge
+                    LOG.info()
+                            .$("merged data + ooo [dataFrom=").$(0)
+                            .$(", dataTo=").$(l2_data)
+                            .$(", oooFrom=").$(l1 + 1)
+                            .$(", oooTo=").$(l2_ooo)
+                            .$(']').$();
+                } else {
+
+                    //            +-----+
+                    //            | OOO |
+                    //            +-----+
+                    //
+                    //  +------+
+                    //  | data |
+
+                    l2_ooo = indexHi;
+                    l2_data = 0;
+                }
+            } else {
+
+                //   +------+                +------+  +-----+
+                //   | data |  +-----+       | data |  |     |
+                //   |      |  | OOO |  OR   |      |  | OOO |
+                //   |      |  |     |       |      |  |     |
+
+                if (ooTimestampLo <= dataTimestampHi) {
+
+                    //
+                    // |      |
+                    // |      | +-----+
+                    // | data | | OOO |
+                    // +------+
+
+                    long l1_data = BinarySearch.search(timestampSearchColumn, ooTimestampLo, 0, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
+                    LOG.info().$("copy data set [from=").$(0).$(", to=").$(l1_data).$(']').$();
+
+                    if (ooTimestampHi < dataTimestampHi) {
+
+                        //
+                        // |      | +-----+
+                        // | data | | OOO |
+                        // |      | +-----+
+                        // +------+
+
+                        l2_ooo = indexHi;
+                        l2_data = BinarySearch.search(timestampSearchColumn, ooTimestampHi, l1_data, dataIndexMax - 1, BinarySearch.SCAN_DOWN);
+                    } else if (ooTimestampHi > dataTimestampHi) {
+
+                        //
+                        // |      | +-----+
+                        // | data | | OOO |
+                        // |      | |     |
+                        // +------+ |     |
+                        //          |     |
+                        //          +-----+
+
+                        l2_ooo = searchIndex(mergedTimestamps, dataTimestampHi, indexLo, indexHi, BinarySearch.SCAN_DOWN);
+                        l2_data = dataIndexMax - 1;
+                    } else {
+
+                        //
+                        // |      | +-----+
+                        // | data | | OOO |
+                        // |      | |     |
+                        // +------+ +-----+
+                        //
+
+                        l2_ooo = indexHi;
+                        l2_data = dataIndexMax - 1;
+                    }
+
+                    // do the merge
+                    LOG.info()
+                            .$("merged data + ooo [dataFrom=").$(l1_data + 1)
+                            .$(", dataTo=").$(l2_data)
+                            .$(", oooFrom=").$(indexLo)
+                            .$(", oooTo=").$(l2_ooo)
+                            .$(']').$();
+
+                } else {
+
+                    // +------+
+                    // | data |
+                    // |      |
+                    // +------+
+                    //
+                    //           +-----+
+                    //           | OOO |
+                    //           |     |
+                    //
+                    l2_ooo = indexLo - 1;
+                    l2_data = dataIndexMax - 1;
+                }
+            }
+
+            if (l2_ooo < indexHi) {
+                LOG.info().$("copy ooo set [from=").$(l2_ooo + 1).$(", to=").$(indexHi).$(']').$();
+            } else if (l2_data < dataIndexMax - 1) {
+                LOG.info().$("copy date set [from=").$(l2_data + 1).$(", to=").$(dataIndexMax - 1).$(']').$();
+            }
+
+        } finally {
+            if (fdToClose > 0) {
+                ff.close(fdToClose);
+            }
+        }
+        this.mergeRowCount = 0;
+    }
+
+    private void mergeTimestampSetter(long timestamp) {
+        timestampMergeMem.putLong(timestamp);
+        timestampMergeMem.putLong(mergeRowCount++);
+    }
+
     private long openAppend(LPSZ name) {
         long fd = ff.openAppend(name);
         if (fd == -1) {
@@ -2055,6 +2097,19 @@ public class TableWriter implements Closeable {
             performRecovery();
         }
         txPartitionCount = 1;
+    }
+
+    private void openMergePartition() {
+        for (int i = 0; i < columnCount; i++) {
+            VirtualMemory mem1 = mergeColumns.getQuick(getPrimaryColumnIndex(i));
+            mem1.clear();
+            VirtualMemory mem2 = mergeColumns.getQuick(getSecondaryColumnIndex(i));
+            if (mem2 != null) {
+                mem2.clear();
+            }
+        }
+        row.rowColumns = mergeColumns;
+        LOG.info().$("switched partition to memory").$();
     }
 
     private void openMetaFile() {
@@ -2094,19 +2149,6 @@ public class TableWriter implements Closeable {
         } finally {
             path.trimTo(rootLen);
         }
-    }
-
-    private void openMergePartition() {
-        for (int i = 0; i < columnCount; i++) {
-            VirtualMemory mem1 = mergeColumns.getQuick(getPrimaryColumnIndex(i));
-            mem1.clear();
-            VirtualMemory mem2 = mergeColumns.getQuick(getSecondaryColumnIndex(i));
-            if (mem2 != null) {
-                mem2.clear();
-            }
-        }
-        row.rowColumns = mergeColumns;
-        LOG.info().$("switched partition to memory").$();
     }
 
     private void openPartition(long timestamp) {
@@ -2333,37 +2375,6 @@ public class TableWriter implements Closeable {
         }
     }
 
-    private int renameColumnFromMeta(int index, CharSequence newName) {
-        try {
-            int metaSwapIndex = openMetaSwapFile(ff, ddlMem, path, rootLen, fileOperationRetryCount);
-            int timestampIndex = metaMem.getInt(META_OFFSET_TIMESTAMP_INDEX);
-            ddlMem.putInt(columnCount);
-            ddlMem.putInt(partitionBy);
-            ddlMem.putInt(timestampIndex);
-            ddlMem.putInt(ColumnType.VERSION);
-            ddlMem.jumpTo(META_OFFSET_COLUMN_TYPES);
-
-            for (int i = 0; i < columnCount; i++) {
-                writeColumnEntry(i);
-            }
-
-            long nameOffset = getColumnNameOffset(columnCount);
-            for (int i = 0; i < columnCount; i++) {
-                CharSequence columnName = metaMem.getStr(nameOffset);
-                nameOffset += VirtualMemory.getStorageLength(columnName);
-
-                if (i == index) {
-                    columnName = newName;
-                }
-                ddlMem.putStr(columnName);
-            }
-
-            return metaSwapIndex;
-        } finally {
-            ddlMem.close();
-        }
-    }
-
     private void removeIndexFiles(CharSequence columnName) {
         try {
             ff.iterateDir(path.$(), (file, type) -> {
@@ -2511,6 +2522,67 @@ public class TableWriter implements Closeable {
         } finally {
             path.trimTo(rootLen);
             other.trimTo(rootLen);
+        }
+    }
+
+    private void renameColumnFiles(CharSequence columnName, CharSequence newName, int columnType) {
+        try {
+            ff.iterateDir(path.$(), (file, type) -> {
+                nativeLPSZ.of(file);
+                if (type == Files.DT_DIR && IGNORED_FILES.excludes(nativeLPSZ)) {
+                    path.trimTo(rootLen);
+                    path.concat(nativeLPSZ);
+                    other.trimTo(rootLen);
+                    other.concat(nativeLPSZ);
+                    int plen = path.length();
+                    renameFileOrLog(ff, dFile(path.trimTo(plen), columnName), dFile(other.trimTo(plen), newName));
+                    renameFileOrLog(ff, iFile(path.trimTo(plen), columnName), iFile(other.trimTo(plen), newName));
+                    renameFileOrLog(ff, topFile(path.trimTo(plen), columnName), topFile(other.trimTo(plen), newName));
+                    renameFileOrLog(ff, BitmapIndexUtils.keyFileName(path.trimTo(plen), columnName), BitmapIndexUtils.keyFileName(other.trimTo(plen), newName));
+                    renameFileOrLog(ff, BitmapIndexUtils.valueFileName(path.trimTo(plen), columnName), BitmapIndexUtils.valueFileName(other.trimTo(plen), newName));
+                }
+            });
+
+            if (columnType == ColumnType.SYMBOL) {
+                renameFileOrLog(ff, SymbolMapWriter.offsetFileName(path.trimTo(rootLen), columnName), SymbolMapWriter.offsetFileName(other.trimTo(rootLen), newName));
+                renameFileOrLog(ff, SymbolMapWriter.charFileName(path.trimTo(rootLen), columnName), SymbolMapWriter.charFileName(other.trimTo(rootLen), newName));
+                renameFileOrLog(ff, BitmapIndexUtils.keyFileName(path.trimTo(rootLen), columnName), BitmapIndexUtils.keyFileName(other.trimTo(rootLen), newName));
+                renameFileOrLog(ff, BitmapIndexUtils.valueFileName(path.trimTo(rootLen), columnName), BitmapIndexUtils.valueFileName(other.trimTo(rootLen), newName));
+            }
+        } finally {
+            path.trimTo(rootLen);
+            other.trimTo(rootLen);
+        }
+    }
+
+    private int renameColumnFromMeta(int index, CharSequence newName) {
+        try {
+            int metaSwapIndex = openMetaSwapFile(ff, ddlMem, path, rootLen, fileOperationRetryCount);
+            int timestampIndex = metaMem.getInt(META_OFFSET_TIMESTAMP_INDEX);
+            ddlMem.putInt(columnCount);
+            ddlMem.putInt(partitionBy);
+            ddlMem.putInt(timestampIndex);
+            ddlMem.putInt(ColumnType.VERSION);
+            ddlMem.jumpTo(META_OFFSET_COLUMN_TYPES);
+
+            for (int i = 0; i < columnCount; i++) {
+                writeColumnEntry(i);
+            }
+
+            long nameOffset = getColumnNameOffset(columnCount);
+            for (int i = 0; i < columnCount; i++) {
+                CharSequence columnName = metaMem.getStr(nameOffset);
+                nameOffset += VirtualMemory.getStorageLength(columnName);
+
+                if (i == index) {
+                    columnName = newName;
+                }
+                ddlMem.putStr(columnName);
+            }
+
+            return metaSwapIndex;
+        } finally {
+            ddlMem.close();
         }
     }
 
@@ -2995,11 +3067,6 @@ public class TableWriter implements Closeable {
         }
     }
 
-    private void mergeTimestampSetter(long timestamp) {
-        timestampMergeMem.putLong(timestamp);
-        timestampMergeMem.putLong(mergeRowCount++);
-    }
-
     @FunctionalInterface
     private interface RemoveFileLambda {
         void remove(FilesFacade ff, LPSZ name);
@@ -3119,14 +3186,6 @@ public class TableWriter implements Closeable {
             }
         }
 
-        private VirtualMemory getPrimaryColumn(int columnIndex) {
-            return rowColumns.getQuick(getPrimaryColumnIndex(columnIndex));
-        }
-
-        private VirtualMemory getSecondaryColumn(int columnIndex) {
-            return rowColumns.getQuick(getSecondaryColumnIndex(columnIndex));
-        }
-
         public void cancel() {
             cancelRow();
         }
@@ -3234,8 +3293,24 @@ public class TableWriter implements Closeable {
             putLong(index, value);
         }
 
+        private VirtualMemory getPrimaryColumn(int columnIndex) {
+            return rowColumns.getQuick(getPrimaryColumnIndex(columnIndex));
+        }
+
+        private VirtualMemory getSecondaryColumn(int columnIndex) {
+            return rowColumns.getQuick(getSecondaryColumnIndex(columnIndex));
+        }
+
         private void notNull(int index) {
             refs.setQuick(index, masterRef);
         }
+    }
+
+    static {
+        IGNORED_FILES.add("..");
+        IGNORED_FILES.add(".");
+        IGNORED_FILES.add(META_FILE_NAME);
+        IGNORED_FILES.add(TXN_FILE_NAME);
+        IGNORED_FILES.add(TODO_FILE_NAME);
     }
 }
