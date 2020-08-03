@@ -1,0 +1,7 @@
+icon: https://raw.githubusercontent.com/questdb/questdb/master/ui/assets/favicon.png
+deploy:
+  - git clone https://github.com/questdb/questdb-kubernetes 
+  - helm install questdb questdb-kubernetes/charts/questdb --set image.tag=latest,persistence.size=1Gi
+  - kubectl annotate service questdb dev.okteto.com/auto-ingress=true
+devs:
+  - okteto.yml

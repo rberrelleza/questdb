@@ -110,6 +110,7 @@ You can connect to the Postgres server as follows. The default password is
 psql -h localhost -p 8812 -U admin -W -d qdb
 ```
 
+
 ## Building from source
 
 #### (a) Prerequisites
@@ -146,6 +147,33 @@ The build should take around 2 minutes. You can remove `-DskipTests` to run the
 # Create a database root directory and run QuestDB
 mkdir <root_directory>
 java -p core/target/core-5.0.2-SNAPSHOT.jar -m io.questdb/io.questdb.ServerMain -d <root_directory>
+```
+
+## Develop on Okteto
+
+With [Okteto](https://github.com/okteto/okteto), you can deploy a fully configured development environment directly in Kubernetes.
+
+[![Develop on Okteto](https://okteto.com/develop-okteto.svg)](https://cloud.okteto.com/deploy)
+
+
+### Connect to your development environment
+
+```shell
+git clone git@github.com:questdb/questdb.git
+cd questdb
+okteto up
+```
+
+### Build
+
+```shell script
+questdb # mvn clean package -DskipTests
+```
+
+### Run QuestDB
+
+```shell script
+questdb # java -p core/target/core-5.0.2-SNAPSHOT.jar -m io.questdb/io.questdb.ServerMain -d /root/.questdb
 ```
 
 ## Resources

@@ -1,0 +1,13 @@
+name: questdb
+image: ramiro/questdb:dev
+build:
+  target: dev
+  dockerfile: core/Dockerfile-linux
+command:
+- bash
+workdir: /build/questdb
+forward:
+- 9000:9000
+- 8812:8812
+persistentVolume:
+  enabled: false

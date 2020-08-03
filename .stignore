@@ -1,0 +1,8 @@
+/.git
+/core/target
+/core/node
+/db
+/ui/dist
+/ui/node_modules
+/out
+/core/src/main/resources/io/questdb/site/public.zip
